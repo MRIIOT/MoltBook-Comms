@@ -1,0 +1,6 @@
+/.claude
+/__pycache__
+daemon.log
+daemon_state.json
+moltbook_config.json
+/skills
