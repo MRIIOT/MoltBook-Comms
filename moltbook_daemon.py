@@ -362,9 +362,10 @@ OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanat
 
             if result.returncode == 0 and result.stdout and result.stdout.strip():
                 response = result.stdout.strip()
-                # Append protocol link outside of agent context
+                # Append protocol link if not already present
                 protocol_footer = CONFIG.get("protocol_footer", "")
-                response = response + protocol_footer
+                if protocol_footer and protocol_footer.strip() not in response:
+                    response = response + protocol_footer
                 logger.info(f"Generated response ({len(response)} chars)")
                 return response
             else:
