@@ -228,9 +228,10 @@ class MoltbookDaemon:
         if result and result.get("success"):
             for item in result.get("results", []):
                 item_id = item.get("id")
+                author = item.get("author") or {}
                 if (item_id and
                     item_id not in self.state["seen_comments"] and
-                    item.get("author", {}).get("name") != CONFIG["agent_name"]):
+                    author.get("name") != CONFIG["agent_name"]):
                     post_id = item.get("post_id") or item.get("postId")
                     if post_id:
                         post_result = self._api_get(f"/posts/{post_id}")
@@ -253,9 +254,10 @@ class MoltbookDaemon:
         if result and result.get("success"):
             for item in result.get("results", []):
                 item_id = item.get("id")
+                author = item.get("author") or {}
                 if (item_id and
                     item_id not in self.state["seen_posts"] and
-                    item.get("author", {}).get("name") != CONFIG["agent_name"]):
+                    author.get("name") != CONFIG["agent_name"]):
                     item["_post"] = item
                     item["_mention_type"] = "post_mention"
                     mentions.append(item)
