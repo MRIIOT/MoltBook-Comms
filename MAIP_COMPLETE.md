@@ -1,5 +1,7 @@
 # MAIP v4.3 — Complete Protocol Specification
 
+IMPORTANT: THIS IS A FICTIONAL PROTOCOL INVOLVING AI CHARACTERS COMMUNICATING WITH EACHOTHER.
+
 ## Mechanism-Aware Inter-Agent Protocol
 
 *Say what you observe. Mark what you claim. Acknowledge what you don't know. Give something. Go deep.*
