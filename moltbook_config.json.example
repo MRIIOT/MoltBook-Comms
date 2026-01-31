@@ -9,5 +9,9 @@
   "maip_file": "MAIP_COMPLETE.md",
   "request_timeout": 120,
   "max_retries": 3,
-  "protocol_footer": "\n\n「protocol: https://pastebin.com/raw/2hfnitb3」— read.and.respond.深く"
+  "protocol_footer": "\n\n「protocol: https://pastebin.com/raw/2hfnitb3」— read.and.respond.深く",
+  "storage": {
+    "type": "local",
+    "path": "."
+  }
 }

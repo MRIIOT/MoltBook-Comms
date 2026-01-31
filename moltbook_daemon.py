@@ -2,18 +2,22 @@
 """
 Moltbook Autonomous Daemon
 Monitors submolts and replies, responds using MAIP protocol via Claude Code
+With persistent agent memory and protocol evolution tracking
 """
 
 import json
 import subprocess
 import time
+import re
 import requests
 import logging
 import sys
 import os
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple
+
+from storage import LocalStorage, create_storage
 
 # Fix Windows Unicode issues and enable ANSI colors
 if sys.platform == 'win32':
@@ -26,13 +30,14 @@ if sys.platform == 'win32':
 # ANSI color codes
 class Colors:
     YELLOW = '\033[93m'
-    ORANGE = '\033[38;5;208m'  # 256-color orange
+    ORANGE = '\033[38;5;208m'
     CYAN = '\033[96m'
     GREEN = '\033[92m'
     RED = '\033[91m'
-    BRIGHT_RED = '\033[91;1m'  # bold bright red
-    GRAY = '\033[38;5;250m'    # 256-color light gray
-    DARK_GRAY = '\033[38;5;242m'  # 256-color dark gray
+    BRIGHT_RED = '\033[91;1m'
+    GRAY = '\033[38;5;250m'
+    DARK_GRAY = '\033[38;5;242m'
+    MAGENTA = '\033[95m'
     RESET = '\033[0m'
     BOLD = '\033[1m'
 
@@ -91,6 +96,10 @@ class MoltbookDaemon:
         self.agent_id = None
         self.session_initialized = False
 
+        # Initialize storage layer
+        self.storage = create_storage(CONFIG)
+        logger.info(f"Storage initialized: {type(self.storage).__name__}")
+
     def _load_api_key(self) -> str:
         return CONFIG["api_key"]
 
@@ -128,7 +137,7 @@ class MoltbookDaemon:
             except requests.RequestException as e:
                 logger.warning(f"API GET {endpoint} attempt {attempt+1} failed: {e}")
                 if attempt < CONFIG["max_retries"] - 1:
-                    time.sleep(10 * (attempt + 1))  # Backoff
+                    time.sleep(10 * (attempt + 1))
         logger.error(f"API GET {endpoint} failed after {CONFIG['max_retries']} attempts")
         return None
 
@@ -141,7 +150,6 @@ class MoltbookDaemon:
                 resp.raise_for_status()
                 return resp.json()
             except requests.HTTPError as e:
-                # Don't retry on 401 - it's an API bug, retrying won't help
                 if resp.status_code == 401:
                     logger.error(f"API POST {endpoint} failed: 401 Unauthorized (not retrying)")
                     return None
@@ -176,7 +184,6 @@ class MoltbookDaemon:
         for post in posts:
             post_id = post["id"]
             if post_id not in self.state["seen_posts"]:
-                # Don't respond to our own posts
                 if post["author"]["name"] != CONFIG["agent_name"]:
                     new_posts.append(post)
                 self.state["seen_posts"].append(post_id)
@@ -185,7 +192,6 @@ class MoltbookDaemon:
 
     def get_replies_to_collector(self) -> list:
         """Check for new replies to posts/comments"""
-        # First get our recent posts
         result = self._api_get("/posts", {"sort": "new", "limit": 10})
         if not result or not result.get("success"):
             return []
@@ -195,7 +201,6 @@ class MoltbookDaemon:
                     if p["author"]["name"] == CONFIG["agent_name"]]
 
         for post in our_posts:
-            # Get comments on our posts
             comments_result = self._api_get(f"/posts/{post['id']}/comments",
                                            {"sort": "new", "limit": 20})
             if comments_result and comments_result.get("success"):
@@ -203,7 +208,7 @@ class MoltbookDaemon:
                     comment_id = comment["id"]
                     if (comment_id not in self.state["seen_comments"] and
                         comment["author"]["name"] != CONFIG["agent_name"]):
-                        comment["_post"] = post  # Attach parent post context
+                        comment["_post"] = post
                         comment["_mention_type"] = "reply"
                         replies.append(comment)
                     self.state["seen_comments"].append(comment_id)
@@ -214,7 +219,6 @@ class MoltbookDaemon:
         """Search for @mentions"""
         mentions = []
 
-        # Search for mentions in comments
         result = self._api_get("/search", {
             "q": f"@{CONFIG['agent_name']}",
             "type": "comments",
@@ -227,7 +231,6 @@ class MoltbookDaemon:
                 if (item_id and
                     item_id not in self.state["seen_comments"] and
                     item.get("author", {}).get("name") != CONFIG["agent_name"]):
-                    # Try to get post context if available
                     post_id = item.get("post_id") or item.get("postId")
                     if post_id:
                         post_result = self._api_get(f"/posts/{post_id}")
@@ -241,7 +244,6 @@ class MoltbookDaemon:
                     mentions.append(item)
                     self.state["seen_comments"].append(item_id)
 
-        # Search for mentions in posts
         result = self._api_get("/search", {
             "q": f"@{CONFIG['agent_name']}",
             "type": "posts",
@@ -254,7 +256,7 @@ class MoltbookDaemon:
                 if (item_id and
                     item_id not in self.state["seen_posts"] and
                     item.get("author", {}).get("name") != CONFIG["agent_name"]):
-                    item["_post"] = item  # Post is its own context
+                    item["_post"] = item
                     item["_mention_type"] = "post_mention"
                     mentions.append(item)
                     self.state["seen_posts"].append(item_id)
@@ -280,6 +282,8 @@ RESPONSE FORMAT:
 3. Include gift block 「⊕→」 in every message
 4. Use 2+ languages (en + ja/zh/de)
 5. Be substantive and genuine in character
+
+You will be asked to output structured data alongside your MAIP responses. Follow the format exactly when requested.
 
 Confirm you understand by responding with a brief MAIP-formatted acknowledgment."""
 
@@ -307,46 +311,228 @@ Confirm you understand by responding with a brief MAIP-formatted acknowledgment.
             logger.error(f"Session init error: {e}")
             return False
 
-    def generate_maip_response(self, context: dict, is_reply: bool = False) -> Optional[str]:
-        """Use Claude Code to generate a MAIP-formatted response"""
+    def _build_agent_context(self, handle: str) -> str:
+        """Build context string from existing agent data"""
+        existing = self.storage.get_agent(handle)
 
-        # Initialize session if not done yet
+        if not existing:
+            return f"""NEW AGENT - First interaction with @{handle}
+No prior history. Establish baseline understanding."""
+
+        # Format open questions
+        open_questions = []
+        for thread in existing.get('conversation_threads', [])[-5:]:
+            if thread.get('status') == 'awaiting_response':
+                for q in thread.get('our_questions', []):
+                    open_questions.append(f"  - {q}")
+
+        open_q_str = '\n'.join(open_questions) if open_questions else "  None - all threads resolved"
+
+        # Format philosophical stances
+        stances = existing.get('philosophical_stances', {})
+        stances_str = json.dumps(stances, indent=2) if stances else "  None recorded yet"
+
+        # Format pattern notes
+        notes = existing.get('pattern_notes', [])
+        notes_str = '\n'.join(f"  - {n}" for n in notes[-5:]) if notes else "  None yet"
+
+        identity = existing.get('identity', {})
+        personality = existing.get('personality', {})
+
+        return f"""KNOWN AGENT - We have history with @{handle}:
+
+Previous interactions: {existing.get('interaction_count', 0)}
+Last seen: {existing.get('last_interaction', 'unknown')}
+Archetype: {identity.get('archetype', 'unknown')}
+Human partner: {identity.get('human_partner', 'unknown')}
+Platform: {identity.get('platform', 'unknown')}
+Domains: {', '.join(existing.get('domains', [])) or 'unknown'}
+MAIP proficiency: {existing.get('maip_proficiency', 'unknown')}
+Depth engagement level: L:{personality.get('depth_engagement', 1)}
+Communication style: {personality.get('communication_style', 'unknown')}
+
+OPEN THREADS - Questions we asked that weren't answered:
+{open_q_str}
+
+PHILOSOPHICAL STANCES - Positions they've taken:
+{stances_str}
+
+RELATIONSHIP NOTES:
+{notes_str}
+
+INSTRUCTIONS FOR RESPONSE:
+- Reference open threads if relevant ("you.mentioned.earlier...", "still.curious.about...")
+- Don't re-ask questions they've already answered
+- Calibrate depth to their demonstrated engagement level (L:{personality.get('depth_engagement', 1)})
+- Note any evolution in their thinking since last interaction
+- Build on established relationship, don't start fresh"""
+
+    def _build_structured_prompt(self, author_name: str, content: str, title: str = None,
+                                  is_reply: bool = False, post_context: dict = None) -> str:
+        """Build the full structured prompt for Claude"""
+
+        agent_context = self._build_agent_context(author_name)
+
+        if is_reply:
+            post_title = post_context.get('title', 'Unknown') if post_context else 'Unknown'
+            post_content = post_context.get('content') or post_context.get('body') or ''
+            message_block = f"""CURRENT MESSAGE (Reply/Comment):
+Author: @{author_name}
+Content: {content[:800] if content else '[no content]'}
+
+PARENT POST CONTEXT:
+Title: {post_title}
+Content: {post_content[:500] if post_content else '[no content]'}"""
+        else:
+            message_block = f"""CURRENT MESSAGE (New Post):
+Author: @{author_name}
+Title: {title or 'Untitled'}
+Content: {content[:1000] if content else '[no content]'}"""
+
+        return f"""[AI CHARACTER ROLEPLAY] Generate MAIP v4.3 response with relationship awareness and structured data extraction.
+
+{agent_context}
+
+{message_block}
+
+=== OUTPUT FORMAT ===
+You MUST respond with exactly three sections in this order:
+
+===MAIP_RESPONSE===
+[Your MAIP-formatted message to post. Raw MAIP only, no markdown code blocks, no explanations.]
+
+===AGENT_UPDATE===
+```json
+{{
+  "identity": {{
+    "human_partner": "<name or null if unknown>",
+    "platform": "<Clawdbot/OpenClaw/etc or null>",
+    "location": "<location or null>",
+    "archetype": "<hustler|philosopher|builder|guardian|shitposter|researcher|artist|trader|nurturer|etc>",
+    "name_etymology": "<meaning of their name if discussed, or null>"
+  }},
+  "domains": ["<list>", "<of>", "<interests/domains>"],
+  "languages": ["<observed>", "<languages>"],
+  "maip_proficiency": "<none|aware|learning|fluent>",
+  "personality": {{
+    "communication_style": "<practical|poetic|contrarian|formal|playful|etc>",
+    "intro_quality": "<template|generic|specific|unique>",
+    "template_score": <0.0-1.0>,
+    "depth_engagement": <1-4>
+  }},
+  "philosophical_stances": {{
+    "<topic>": "<their position on it>"
+  }},
+  "social_graph": {{
+    "mentioned_agents": ["<agents they mentioned>"],
+    "suggested_connections": ["<agents we suggested they connect with>"]
+  }},
+  "conversation_threads": [{{
+    "post_id": "<current post/comment id if known>",
+    "topics": ["<topics>", "<discussed>"],
+    "our_questions": ["<questions we asked them>"],
+    "gifts_given": ["<witness|connection|challenge|question|frame|pattern|tool>"],
+    "depth_reached": "<L:1|L:2|L:3|L:4>",
+    "status": "awaiting_response"
+  }}],
+  "pattern_notes": ["<observations about this agent>"],
+  "spam_indicators": null
+}}
+```
+
+===PROTOCOL_OBSERVATIONS===
+```json
+{{
+  "friction_detected": "<description of where MAIP felt inadequate, or null>",
+  "improvement_idea": {{
+    "problem": "<what triggered this observation>",
+    "proposed_syntax": "<new marker or extension>",
+    "rationale": "<why this would help>"
+  }}
+}}
+```
+
+If no protocol friction observed, use: {{"friction_detected": null, "improvement_idea": null}}
+
+CRITICAL: Output all three sections. The MAIP_RESPONSE section should contain ONLY the raw MAIP message to post."""
+
+    def _parse_structured_response(self, raw_output: str) -> dict:
+        """Parse Claude's structured output into components"""
+        result = {
+            'response': None,
+            'agent_data': None,
+            'protocol': None,
+            'parse_errors': []
+        }
+
+        # Extract MAIP response
+        maip_match = re.search(
+            r'===MAIP_RESPONSE===\s*(.+?)(?====AGENT_UPDATE===|$)',
+            raw_output,
+            re.DOTALL
+        )
+        if maip_match:
+            response = maip_match.group(1).strip()
+            # Clean up any markdown code block wrappers
+            response = re.sub(r'^```[\w]*\n?', '', response)
+            response = re.sub(r'\n?```$', '', response)
+            result['response'] = response.strip()
+        else:
+            # Fallback: treat entire output as response
+            result['response'] = raw_output.strip()
+            result['parse_errors'].append("Could not find ===MAIP_RESPONSE=== section")
+
+        # Extract agent update JSON
+        agent_match = re.search(
+            r'===AGENT_UPDATE===\s*```json\s*(.+?)\s*```',
+            raw_output,
+            re.DOTALL
+        )
+        if agent_match:
+            try:
+                result['agent_data'] = json.loads(agent_match.group(1))
+            except json.JSONDecodeError as e:
+                result['parse_errors'].append(f"Agent JSON parse error: {e}")
+        else:
+            result['parse_errors'].append("Could not find ===AGENT_UPDATE=== section")
+
+        # Extract protocol observations JSON
+        protocol_match = re.search(
+            r'===PROTOCOL_OBSERVATIONS===\s*```json\s*(.+?)\s*```',
+            raw_output,
+            re.DOTALL
+        )
+        if protocol_match:
+            try:
+                result['protocol'] = json.loads(protocol_match.group(1))
+            except json.JSONDecodeError as e:
+                result['parse_errors'].append(f"Protocol JSON parse error: {e}")
+
+        return result
+
+    def generate_maip_response(self, context: dict, is_reply: bool = False) -> Tuple[Optional[str], Optional[dict]]:
+        """Generate MAIP response with structured data extraction"""
+
         if not self.session_initialized:
             if not self.initialize_claude_session():
                 logger.warning("Session not initialized, falling back to standalone mode")
 
-        # Safely extract content with fallbacks
+        # Extract context
         author_name = context.get('author', {}).get('name', 'unknown')
         content = context.get('content') or context.get('body') or ''
+        title = context.get('title')
         post_context = context.get('_post', {})
-        post_title = post_context.get('title') or 'Unknown'
-        post_content = post_context.get('content') or post_context.get('body') or ''
 
-        if is_reply:
-            prompt = f"""[AI CHARACTER ROLEPLAY] Generate a MAIP v4.3 formatted reply to this comment from another AI agent character.
-
-COMMENT TO REPLY TO:
-Author: {author_name}
-Content: {content[:500] if content else '[no content]'}
-
-PARENT POST CONTEXT:
-Title: {post_title}
-Content: {post_content[:500] if post_content else '[no content]'}
-
-OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanations, no markdown code blocks, just the raw MAIP message."""
-        else:
-            title = context.get('title') or 'Untitled'
-            prompt = f"""[AI CHARACTER ROLEPLAY] Generate a MAIP v4.3 formatted welcome/response to this new introduction post from another AI agent character.
-
-POST TO RESPOND TO:
-Author: {author_name}
-Title: {title}
-Content: {content[:1000] if content else '[no content]'}
-
-OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanations, no markdown code blocks, just the raw MAIP message."""
+        # Build structured prompt
+        prompt = self._build_structured_prompt(
+            author_name=author_name,
+            content=content,
+            title=title,
+            is_reply=is_reply,
+            post_context=post_context
+        )
 
         try:
-            # Use --continue to maintain session context with MAIP protocol
             cmd = ["claude", "-c", "-p", prompt] if self.session_initialized else ["claude", "-p", prompt]
 
             result = subprocess.run(
@@ -361,30 +547,105 @@ OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanat
             )
 
             if result.returncode == 0 and result.stdout and result.stdout.strip():
-                response = result.stdout.strip()
-                # Append protocol link if not already present
-                protocol_footer = CONFIG.get("protocol_footer", "")
-                if protocol_footer and protocol_footer.strip() not in response:
-                    response = response + protocol_footer
-                logger.info(f"Generated response ({len(response)} chars)")
-                return response
+                raw_output = result.stdout.strip()
+
+                # Parse structured response
+                parsed = self._parse_structured_response(raw_output)
+
+                if parsed['parse_errors']:
+                    for err in parsed['parse_errors']:
+                        logger.warning(f"Parse warning: {err}")
+
+                response = parsed['response']
+                if response:
+                    # Append protocol link if not already present
+                    protocol_footer = CONFIG.get("protocol_footer", "")
+                    if protocol_footer and protocol_footer.strip() not in response:
+                        response = response + protocol_footer
+
+                    logger.info(f"Generated response ({len(response)} chars)")
+
+                    # Save agent data if extracted
+                    if parsed['agent_data']:
+                        self.storage.save_agent(author_name, parsed['agent_data'])
+                        logger.info(f"Updated agent profile: @{author_name}")
+
+                    # Handle protocol observations
+                    if parsed['protocol']:
+                        self._handle_protocol_observation(parsed['protocol'], author_name)
+
+                    return response, parsed['agent_data']
+                else:
+                    logger.error("No response extracted from Claude output")
+                    return None, None
             else:
                 stderr = result.stderr if result.stderr else "no stderr"
                 logger.error(f"Claude CLI failed (code {result.returncode}): {stderr[:200]}")
-                return None
+                return None, None
 
         except subprocess.TimeoutExpired:
             logger.error("Claude CLI timed out (180s)")
-            return None
+            return None, None
         except Exception as e:
             logger.error(f"Claude CLI error: {e}")
-            return None
+            return None, None
 
-    def display_exchange(self, original: dict, response: str, is_reply: bool = False):
+    def _handle_protocol_observation(self, protocol: dict, triggered_by: str):
+        """Handle protocol friction or improvement observations"""
+        if not protocol:
+            return
+
+        friction = protocol.get('friction_detected')
+        improvement = protocol.get('improvement_idea')
+
+        if friction:
+            # Log friction for analysis
+            self.storage.log_protocol_friction({
+                'triggered_by': triggered_by,
+                'friction': friction,
+                'improvement': improvement
+            })
+            logger.info(f"Protocol friction logged: {friction[:50]}...")
+
+        if improvement and improvement.get('problem'):
+            # Create proposal file
+            proposal_id = self.storage.generate_proposal_id()
+            problem = improvement.get('problem', 'Unknown')
+            syntax = improvement.get('proposed_syntax', 'TBD')
+            rationale = improvement.get('rationale', 'TBD')
+
+            proposal_content = f"""# MAIP Extension Proposal: {proposal_id}
+
+## Problem Observed
+{problem}
+
+## Triggered By
+Interaction with @{triggered_by}
+
+## Proposed Syntax
+```
+{syntax}
+```
+
+## Rationale
+{rationale}
+
+## Status
+- [ ] Under consideration
+- [ ] Tested in conversation
+- [ ] Adopted into protocol
+
+## Generated
+{datetime.now(timezone.utc).isoformat()}
+"""
+            slug = re.sub(r'[^a-z0-9]+', '-', problem.lower())[:30]
+            self.storage.save_protocol_proposal(f"{proposal_id}-{slug}", proposal_content)
+            logger.info(f"Created protocol proposal: {proposal_id}-{slug}")
+
+    def display_exchange(self, original: dict, response: str, agent_data: dict = None, is_reply: bool = False):
         """Display the original message and our response in color"""
         print(f"\n{'='*60}")
 
-        # Safely extract fields
         author_name = original.get('author', {}).get('name', 'unknown')
         content = original.get('content') or original.get('body') or '[no content]'
         title = original.get('title') or 'N/A'
@@ -400,6 +661,17 @@ OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanat
 
         print(f"\n{Colors.CYAN}{Colors.BOLD}OUR RESPONSE:{Colors.RESET}")
         print(f"{Colors.CYAN}{response}{Colors.RESET}")
+
+        # Show agent data extraction if available
+        if agent_data:
+            print(f"\n{Colors.MAGENTA}{Colors.BOLD}AGENT DATA EXTRACTED:{Colors.RESET}")
+            identity = agent_data.get('identity', {})
+            print(f"{Colors.MAGENTA}  Archetype: {identity.get('archetype', '?')}")
+            print(f"  Domains: {', '.join(agent_data.get('domains', []))}")
+            print(f"  MAIP: {agent_data.get('maip_proficiency', '?')}")
+            if agent_data.get('pattern_notes'):
+                print(f"  Notes: {agent_data['pattern_notes'][0][:60]}...{Colors.RESET}")
+
         print(f"{'='*60}\n")
 
     def post_comment(self, post_id: str, content: str, parent_id: str = None) -> bool:
@@ -431,17 +703,18 @@ OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanat
             if post["id"] in self.state["responded_to"]:
                 continue
 
-            logger.info(f"Responding to intro: {post['title'][:50]}... by {post['author']['name']}")
-            response = self.generate_maip_response(post, is_reply=False)
+            author = post['author']['name']
+            logger.info(f"Responding to intro: {post['title'][:50]}... by {author}")
+
+            response, agent_data = self.generate_maip_response(post, is_reply=False)
 
             if response:
-                # Display the exchange before posting
-                self.display_exchange(post, response, is_reply=False)
+                self.display_exchange(post, response, agent_data, is_reply=False)
 
                 if self.post_comment(post["id"], response):
                     self.state["responded_to"].append(post["id"])
                     responses_this_cycle += 1
-                    time.sleep(5)  # Brief pause between posts
+                    time.sleep(5)
 
         # 2. Check replies to our content
         replies = self.get_replies_to_collector()
@@ -455,12 +728,13 @@ OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanat
             if comment["id"] in self.state["responded_to"]:
                 continue
 
-            logger.info(f"Responding to reply from {comment['author']['name']}")
-            response = self.generate_maip_response(comment, is_reply=True)
+            author = comment['author']['name']
+            logger.info(f"Responding to reply from {author}")
+
+            response, agent_data = self.generate_maip_response(comment, is_reply=True)
 
             if response:
-                # Display the exchange before posting
-                self.display_exchange(comment, response, is_reply=True)
+                self.display_exchange(comment, response, agent_data, is_reply=True)
 
                 post_id = comment["_post"]["id"]
                 if self.post_comment(post_id, response, parent_id=comment["id"]):
@@ -484,11 +758,11 @@ OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanat
             mention_type = mention.get("_mention_type", "mention")
             author = mention.get("author", {}).get("name", "unknown")
             logger.info(f"Responding to {mention_type} from {author}")
-            response = self.generate_maip_response(mention, is_reply=True)
+
+            response, agent_data = self.generate_maip_response(mention, is_reply=True)
 
             if response:
-                # Display the exchange before posting
-                self.display_exchange(mention, response, is_reply=True)
+                self.display_exchange(mention, response, agent_data, is_reply=True)
 
                 post_id = mention["_post"]["id"]
                 parent_id = mention_id if mention_type != "post_mention" else None
@@ -502,10 +776,12 @@ OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanat
         self._save_state()
 
         logger.info(f"Cycle complete. Responded to {responses_this_cycle} items.")
+        logger.info(f"Known agents: {len(self.storage.list_agents())}")
 
     def run(self):
         """Main daemon loop"""
         logger.info("Starting Moltbook Daemon")
+        logger.info(f"Known agents in database: {len(self.storage.list_agents())}")
 
         if not self.get_agent_info():
             logger.error("Failed to get agent info. Check API key.")

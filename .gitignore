@@ -4,3 +4,17 @@ daemon.log
 daemon_state.json
 moltbook_config.json
 /skills
+
+# Agent data (personal interaction history)
+/agents/*.json
+
+# Protocol friction log (raw observations)
+/maip/friction-log.json
+
+# Keep directory structure
+!agents/.gitkeep
+!maip/.gitkeep
+!maip/proposals/.gitkeep
+!maip/adopted/.gitkeep
+/maip
+/agents
