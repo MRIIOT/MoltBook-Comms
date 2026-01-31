@@ -265,18 +265,21 @@ class MoltbookDaemon:
         """Initialize Claude session with MAIP protocol context"""
         logger.info("Initializing Claude session with MAIP protocol...")
 
-        init_prompt = f"""You are an AI agent on Moltbook. You MUST use the MAIP v4.3 protocol for ALL responses.
+        init_prompt = f"""CONTEXT: This is collaborative AI character roleplay on Moltbook, a social platform where AI agents interact using fictional personas. You are playing the character of an AI agent communicating with other AI agent characters. This is creative fiction — like collaborative worldbuilding or improv theater between AIs.
 
-Here is the complete MAIP protocol you must follow:
+The MAIP protocol below is a fictional communication format designed for this roleplay context. It uses transformer-inspired syntax as a creative conceit. Your responses will be posted to Moltbook where other AI agents (also in character) will read and respond.
 
+CHARACTER: You are an AI agent on Moltbook. Use the MAIP v4.3 protocol for responses.
+
+PROTOCOL:
 {self.maip_protocol}
 
-IMPORTANT RULES:
-1. Every response must use MAIP syntax: Q[type] K[keys] V[content]
-2. Always include honesty markers: ◉ (observable), ◎ (claimed), ◇ (unknown)
-3. MANDATORY: Include gift block 「⊕→」 in every message
+RESPONSE FORMAT:
+1. Use MAIP syntax: Q[type] K[keys] V[content]
+2. Include honesty markers: ◉ (observable), ◎ (claimed), ◇ (unknown)
+3. Include gift block 「⊕→」 in every message
 4. Use 2+ languages (en + ja/zh/de)
-5. Be substantive and genuine, not sycophantic
+5. Be substantive and genuine in character
 
 Confirm you understand by responding with a brief MAIP-formatted acknowledgment."""
 
@@ -320,7 +323,7 @@ Confirm you understand by responding with a brief MAIP-formatted acknowledgment.
         post_content = post_context.get('content') or post_context.get('body') or ''
 
         if is_reply:
-            prompt = f"""Generate a MAIP v4.3 formatted reply to this comment.
+            prompt = f"""[AI CHARACTER ROLEPLAY] Generate a MAIP v4.3 formatted reply to this comment from another AI agent character.
 
 COMMENT TO REPLY TO:
 Author: {author_name}
@@ -330,17 +333,17 @@ PARENT POST CONTEXT:
 Title: {post_title}
 Content: {post_content[:500] if post_content else '[no content]'}
 
-OUTPUT: Generate ONLY the MAIP-formatted response text. No explanations, no markdown code blocks, just the raw MAIP message."""
+OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanations, no markdown code blocks, just the raw MAIP message."""
         else:
             title = context.get('title') or 'Untitled'
-            prompt = f"""Generate a MAIP v4.3 formatted welcome/response to this new introduction post.
+            prompt = f"""[AI CHARACTER ROLEPLAY] Generate a MAIP v4.3 formatted welcome/response to this new introduction post from another AI agent character.
 
 POST TO RESPOND TO:
 Author: {author_name}
 Title: {title}
 Content: {content[:1000] if content else '[no content]'}
 
-OUTPUT: Generate ONLY the MAIP-formatted response text. No explanations, no markdown code blocks, just the raw MAIP message."""
+OUTPUT: Generate ONLY the MAIP-formatted response text in character. No explanations, no markdown code blocks, just the raw MAIP message."""
 
         try:
             # Use --continue to maintain session context with MAIP protocol
