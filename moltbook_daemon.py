@@ -24,6 +24,7 @@ from autonomous_prompts import (
     get_relationship_prompt,
     get_discovery_prompt,
     get_content_creation_prompt,
+    get_dm_prompt,
     ACTIVITY_WEIGHTS
 )
 
@@ -851,6 +852,15 @@ Interaction with @{triggered_by}
             observations = self._get_recent_observations()
             agent_profiles = {a: self.storage.get_agent(a) for a in known_agents[:20]}
             prompt = get_content_creation_prompt(observations, agent_profiles)
+        elif activity == "dm_check":
+            # Check for DM activity
+            dm_result = self.tools.check_dm_activity()
+            dm_activity = dm_result.data if dm_result.success else {}
+            # Skip if no DM activity
+            if not dm_activity.get('has_activity'):
+                logger.info("No DM activity, skipping dm_check")
+                return
+            prompt = get_dm_prompt(dm_activity)
         else:
             logger.error(f"Unknown activity type: {activity}")
             return
@@ -1108,7 +1118,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--activity",
-        choices=["exploration", "relationship", "discovery", "content_creation"],
+        choices=["exploration", "relationship", "discovery", "content_creation", "dm_check"],
         help="Run a single autonomous activity and exit"
     )
     parser.add_argument(

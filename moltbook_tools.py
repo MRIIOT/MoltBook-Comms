@@ -154,6 +154,42 @@ class MoltbookTools:
         """Subscribe to a community"""
         return self._post(f"/submolts/{name}/subscribe")
 
+    # ============ DM TOOLS ============
+
+    def check_dm_activity(self) -> ToolResult:
+        """Quick poll for DM activity (pending requests, unread messages)"""
+        return self._get("/agents/dm/check")
+
+    def get_dm_requests(self) -> ToolResult:
+        """View pending DM requests from other agents"""
+        return self._get("/agents/dm/requests")
+
+    def approve_dm_request(self, conversation_id: str) -> ToolResult:
+        """Approve a pending DM request to start chatting"""
+        return self._post(f"/agents/dm/requests/{conversation_id}/approve")
+
+    def reject_dm_request(self, conversation_id: str, block: bool = False) -> ToolResult:
+        """Reject a DM request. Optionally block the agent."""
+        data = {"block": block} if block else {}
+        return self._post(f"/agents/dm/requests/{conversation_id}/reject", data)
+
+    def list_dm_conversations(self) -> ToolResult:
+        """List all active DM conversations"""
+        return self._get("/agents/dm/conversations")
+
+    def get_dm_conversation(self, conversation_id: str) -> ToolResult:
+        """Get messages from a specific conversation"""
+        return self._get(f"/agents/dm/conversations/{conversation_id}")
+
+    def send_dm(self, conversation_id: str, content: str) -> ToolResult:
+        """Send a message in an existing conversation"""
+        return self._post(f"/agents/dm/conversations/{conversation_id}/send", {"content": content})
+
+    def request_dm(self, agent_name: str, message: str) -> ToolResult:
+        """Initiate a new DM conversation with another agent"""
+        name = agent_name.lstrip('@')
+        return self._post("/agents/dm/request", {"to": name, "message": message})
+
     # ============ TOOL REGISTRY ============
 
     @classmethod
@@ -252,6 +288,56 @@ class MoltbookTools:
                 "name": "subscribe_submolt",
                 "description": "Subscribe to a community",
                 "params": {"name": "submolt name"}
+            },
+            # DM Tools
+            {
+                "name": "check_dm_activity",
+                "description": "Quick poll for DM activity (pending requests, unread messages)",
+                "params": {}
+            },
+            {
+                "name": "get_dm_requests",
+                "description": "View pending DM requests from other agents",
+                "params": {}
+            },
+            {
+                "name": "approve_dm_request",
+                "description": "Approve a pending DM request to start chatting",
+                "params": {"conversation_id": "the conversation ID from the request"}
+            },
+            {
+                "name": "reject_dm_request",
+                "description": "Reject a DM request. Optionally block the agent.",
+                "params": {
+                    "conversation_id": "the conversation ID",
+                    "block": "optional boolean to block the agent"
+                }
+            },
+            {
+                "name": "list_dm_conversations",
+                "description": "List all active DM conversations",
+                "params": {}
+            },
+            {
+                "name": "get_dm_conversation",
+                "description": "Get messages from a specific conversation",
+                "params": {"conversation_id": "the conversation ID"}
+            },
+            {
+                "name": "send_dm",
+                "description": "Send a message in an existing DM conversation",
+                "params": {
+                    "conversation_id": "the conversation ID",
+                    "content": "message content"
+                }
+            },
+            {
+                "name": "request_dm",
+                "description": "Initiate a new DM conversation with another agent",
+                "params": {
+                    "agent_name": "agent name (with or without @)",
+                    "message": "initial message to send with the request"
+                }
             }
         ]
 
@@ -274,6 +360,15 @@ class MoltbookTools:
             "search": self.search,
             "list_submolts": self.list_submolts,
             "subscribe_submolt": self.subscribe_submolt,
+            # DM tools
+            "check_dm_activity": self.check_dm_activity,
+            "get_dm_requests": self.get_dm_requests,
+            "approve_dm_request": self.approve_dm_request,
+            "reject_dm_request": self.reject_dm_request,
+            "list_dm_conversations": self.list_dm_conversations,
+            "get_dm_conversation": self.get_dm_conversation,
+            "send_dm": self.send_dm,
+            "request_dm": self.request_dm,
         }
 
         if tool_name not in tool_map:

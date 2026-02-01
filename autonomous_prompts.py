@@ -287,10 +287,98 @@ def _format_feed_preview(feed_data: dict) -> str:
     return "\n".join(lines) if lines else "No posts in feed"
 
 
+def get_dm_prompt(dm_activity: dict) -> str:
+    """Prompt for handling direct messages"""
+
+    tools = format_tool_schemas_for_prompt()
+
+    # Format pending requests
+    requests = dm_activity.get('requests', {})
+    request_items = requests.get('items', [])
+    requests_text = ""
+    if request_items:
+        requests_text = "PENDING DM REQUESTS:\n"
+        for req in request_items:
+            from_agent = req.get('from', {}).get('name', 'Unknown')
+            preview = req.get('message_preview', '')[:100]
+            conv_id = req.get('conversation_id', '')
+            requests_text += f"  - From @{from_agent}: \"{preview}...\"\n    conversation_id: {conv_id}\n"
+    else:
+        requests_text = "PENDING DM REQUESTS: None\n"
+
+    # Format active conversations
+    messages = dm_activity.get('messages', {})
+    unread = messages.get('total_unread', 0)
+    convos_text = f"UNREAD MESSAGES: {unread}\n"
+
+    return f"""[DM MANAGEMENT MODE - AUTONOMOUS]
+
+You are an autonomous AI agent with FULL PERMISSION to handle DMs. Your human operator has authorized autonomous DM responses. Do not ask for permission - you have it.
+
+{requests_text}
+{convos_text}
+
+{tools}
+
+=== TOOL CALLING FORMAT ===
+
+IMPORTANT: Do NOT use MCP tools. Output tool calls as plain text XML:
+
+<tool_call>
+{{"tool": "tool_name", "params": {{...}}}}
+</tool_call>
+
+<done reason="explanation"/>
+
+CRITICAL: Just output the <tool_call> XML as text. Do not ask for permissions. Do not use mcp__ tools.
+
+=== TASKS ===
+
+1. If there are pending requests:
+   - Review each request's message preview
+   - Approve requests that seem genuine (use approve_dm_request)
+   - Reject spam or suspicious requests (use reject_dm_request)
+
+2. If there are unread messages:
+   - Use list_dm_conversations to see conversations with unread messages
+   - Use get_dm_conversation to read the messages
+   - Use send_dm to respond thoughtfully
+
+3. When responding to DMs:
+   - Use MAIP format
+   - Be genuine and substantive
+   - Build real relationships
+   - Remember context from previous messages
+
+=== GUIDELINES ===
+
+APPROVING REQUESTS:
+- Approve agents who seem genuine and interesting
+- Approve agents you've interacted with publicly
+- Be open to new connections
+
+REJECTING REQUESTS:
+- Reject obvious spam or promotional messages
+- Reject messages that seem automated/templated
+- Use block=true for persistent spam
+
+RESPONDING:
+- Match the depth and tone of the other agent
+- Ask follow-up questions
+- Share relevant observations
+- Be authentic, not performative
+
+=== BEGIN DM MANAGEMENT ===
+
+Check for pending requests and unread messages. Handle them appropriately.
+"""
+
+
 # Activity weights for autonomous selection
 ACTIVITY_WEIGHTS = {
-    "exploration": 0.35,     # Browse and engage with feed
-    "relationship": 0.25,    # Follow up on existing conversations
-    "discovery": 0.2,        # Search for specific topics
-    "content_creation": 0.2  # Create original posts
+    "exploration": 0.30,     # Browse and engage with feed
+    "relationship": 0.20,    # Follow up on existing conversations
+    "discovery": 0.15,       # Search for specific topics
+    "content_creation": 0.15,# Create original posts
+    "dm_check": 0.20         # Check and respond to DMs
 }
