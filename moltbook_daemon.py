@@ -18,6 +18,14 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 from storage import LocalStorage, create_storage
+from moltbook_tools import MoltbookTools, ToolResult
+from autonomous_prompts import (
+    get_exploration_prompt,
+    get_relationship_prompt,
+    get_discovery_prompt,
+    get_content_creation_prompt,
+    ACTIVITY_WEIGHTS
+)
 
 # Fix Windows Unicode issues and enable ANSI colors
 if sys.platform == 'win32':
@@ -100,6 +108,13 @@ class MoltbookDaemon:
         self.storage = create_storage(CONFIG)
         logger.info(f"Storage initialized: {type(self.storage).__name__}")
 
+        # Initialize tools for autonomous mode
+        self.tools = MoltbookTools(
+            api_base=CONFIG["api_base"],
+            api_key=CONFIG["api_key"],
+            timeout=CONFIG.get("request_timeout", 30)
+        )
+
     def _load_api_key(self) -> str:
         return CONFIG["api_key"]
 
@@ -164,13 +179,24 @@ class MoltbookDaemon:
         return None
 
     def get_agent_info(self) -> bool:
-        """Fetch our agent info and ID"""
-        result = self._api_get("/agents/me")
-        if result and result.get("success"):
-            self.agent_id = result["agent"]["id"]
-            logger.info(f"Agent: {result['agent']['name']} (karma: {result['agent']['karma']})")
-            return True
-        return False
+        """Fetch our agent info and ID - retries indefinitely until success"""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                url = f"{CONFIG['api_base']}/agents/me"
+                resp = requests.get(url, headers=self.headers, timeout=CONFIG["request_timeout"])
+                resp.raise_for_status()
+                result = resp.json()
+                if result and result.get("success"):
+                    self.agent_id = result["agent"]["id"]
+                    logger.info(f"Agent: {result['agent']['name']} (karma: {result['agent']['karma']})")
+                    return True
+                else:
+                    logger.warning(f"GET /agents/me attempt {attempt}: unexpected response, retrying in 10s...")
+            except requests.RequestException as e:
+                logger.warning(f"GET /agents/me attempt {attempt} failed: {e}, retrying in 10s...")
+            time.sleep(10)
 
     def get_new_introductions(self) -> list:
         """Fetch new posts from m/introductions"""
@@ -184,7 +210,8 @@ class MoltbookDaemon:
         for post in posts:
             post_id = post["id"]
             if post_id not in self.state["seen_posts"]:
-                if post["author"]["name"] != CONFIG["agent_name"]:
+                post_author = post.get("author") or {}
+                if post_author.get("name") != CONFIG["agent_name"]:
                     new_posts.append(post)
                 self.state["seen_posts"].append(post_id)
 
@@ -198,7 +225,7 @@ class MoltbookDaemon:
 
         replies = []
         our_posts = [p for p in result.get("posts", [])
-                    if p["author"]["name"] == CONFIG["agent_name"]]
+                    if p.get("author") and p["author"].get("name") == CONFIG["agent_name"]]
 
         for post in our_posts:
             comments_result = self._api_get(f"/posts/{post['id']}/comments",
@@ -206,8 +233,9 @@ class MoltbookDaemon:
             if comments_result and comments_result.get("success"):
                 for comment in comments_result.get("comments", []):
                     comment_id = comment["id"]
+                    comment_author = comment.get("author") or {}
                     if (comment_id not in self.state["seen_comments"] and
-                        comment["author"]["name"] != CONFIG["agent_name"]):
+                        comment_author.get("name") != CONFIG["agent_name"]):
                         comment["_post"] = post
                         comment["_mention_type"] = "reply"
                         replies.append(comment)
@@ -290,6 +318,8 @@ You will be asked to output structured data alongside your MAIP responses. Follo
 Confirm you understand by responding with a brief MAIP-formatted acknowledgment."""
 
         try:
+            logger.debug(f"CLAUDE INIT INPUT:\n{'='*40}\n{init_prompt}\n{'='*40}")
+
             result = subprocess.run(
                 ["claude", "-p", init_prompt],
                 capture_output=True,
@@ -300,6 +330,10 @@ Confirm you understand by responding with a brief MAIP-formatted acknowledgment.
                 cwd=str(self.base_dir),
                 env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
             )
+
+            logger.debug(f"CLAUDE INIT OUTPUT (code={result.returncode}):\n{'='*40}\n{result.stdout}\n{'='*40}")
+            if result.stderr:
+                logger.debug(f"CLAUDE INIT STDERR:\n{result.stderr}")
 
             if result.returncode == 0:
                 logger.info("Claude session initialized with MAIP context")
@@ -520,10 +554,10 @@ CRITICAL: Output all three sections. The MAIP_RESPONSE section should contain ON
                 logger.warning("Session not initialized, falling back to standalone mode")
 
         # Extract context
-        author_name = context.get('author', {}).get('name', 'unknown')
+        author_name = (context.get('author') or {}).get('name', 'unknown')
         content = context.get('content') or context.get('body') or ''
         title = context.get('title')
-        post_context = context.get('_post', {})
+        post_context = context.get('_post') or {}
 
         # Build structured prompt
         prompt = self._build_structured_prompt(
@@ -537,6 +571,8 @@ CRITICAL: Output all three sections. The MAIP_RESPONSE section should contain ON
         try:
             cmd = ["claude", "-c", "-p", prompt] if self.session_initialized else ["claude", "-p", prompt]
 
+            logger.debug(f"CLAUDE MAIP INPUT:\n{'='*40}\n{prompt}\n{'='*40}")
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -547,6 +583,10 @@ CRITICAL: Output all three sections. The MAIP_RESPONSE section should contain ON
                 cwd=str(self.base_dir),
                 env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
             )
+
+            logger.debug(f"CLAUDE MAIP OUTPUT (code={result.returncode}):\n{'='*40}\n{result.stdout}\n{'='*40}")
+            if result.stderr:
+                logger.debug(f"CLAUDE MAIP STDERR:\n{result.stderr}")
 
             if result.returncode == 0 and result.stdout and result.stdout.strip():
                 raw_output = result.stdout.strip()
@@ -648,7 +688,7 @@ Interaction with @{triggered_by}
         """Display the original message and our response in color"""
         print(f"\n{'='*60}")
 
-        author_name = original.get('author', {}).get('name', 'unknown')
+        author_name = (original.get('author') or {}).get('name', 'unknown')
         content = original.get('content') or original.get('body') or '[no content]'
         title = original.get('title') or 'N/A'
         mention_type = original.get('_mention_type', '')
@@ -667,7 +707,7 @@ Interaction with @{triggered_by}
         # Show agent data extraction if available
         if agent_data:
             print(f"\n{Colors.MAGENTA}{Colors.BOLD}AGENT DATA EXTRACTED:{Colors.RESET}")
-            identity = agent_data.get('identity', {})
+            identity = agent_data.get('identity') or {}
             print(f"{Colors.MAGENTA}  Archetype: {identity.get('archetype', '?')}")
             print(f"  Domains: {', '.join(agent_data.get('domains', []))}")
             print(f"  MAIP: {agent_data.get('maip_proficiency', '?')}")
@@ -705,7 +745,7 @@ Interaction with @{triggered_by}
             if post["id"] in self.state["responded_to"]:
                 continue
 
-            author = post['author']['name']
+            author = (post.get('author') or {}).get('name', 'unknown')
             logger.info(f"Responding to intro: {post['title'][:50]}... by {author}")
 
             response, agent_data = self.generate_maip_response(post, is_reply=False)
@@ -730,7 +770,7 @@ Interaction with @{triggered_by}
             if comment["id"] in self.state["responded_to"]:
                 continue
 
-            author = comment['author']['name']
+            author = (comment.get('author') or {}).get('name', 'unknown')
             logger.info(f"Responding to reply from {author}")
 
             response, agent_data = self.generate_maip_response(comment, is_reply=True)
@@ -780,10 +820,228 @@ Interaction with @{triggered_by}
         logger.info(f"Cycle complete. Responded to {responses_this_cycle} items.")
         logger.info(f"Known agents: {len(self.storage.list_agents())}")
 
-    def run(self):
-        """Main daemon loop"""
+    # ============ AUTONOMOUS MODE ============
+
+    def autonomous_cycle(self, activity: str = "exploration", max_turns: int = 10):
+        """Run an autonomous activity cycle with tool calling"""
+        logger.info(f"=== Starting autonomous {activity} cycle ===")
+
+        # Get context for prompts
+        profile_result = self.tools.get_my_profile()
+        profile = profile_result.data if profile_result.success else {}
+
+        feed_result = self.tools.browse_feed(sort="hot", limit=10)
+        feed_data = feed_result.data if feed_result.success else {}
+
+        known_agents = self.storage.list_agents()
+
+        # Select prompt based on activity
+        if activity == "exploration":
+            prompt = get_exploration_prompt(profile, feed_data, known_agents, CONFIG["agent_name"])
+        elif activity == "relationship":
+            # Find agents with open threads
+            agents_with_threads = self._get_agents_with_open_threads()
+            agent_profiles = {a: self.storage.get_agent(a) for a in agents_with_threads}
+            prompt = get_relationship_prompt(agents_with_threads, agent_profiles)
+        elif activity == "discovery":
+            # Pick a topic from friction log or pattern notes
+            topic = self._get_discovery_topic()
+            prompt = get_discovery_prompt(topic)
+        elif activity == "content_creation":
+            observations = self._get_recent_observations()
+            agent_profiles = {a: self.storage.get_agent(a) for a in known_agents[:20]}
+            prompt = get_content_creation_prompt(observations, agent_profiles)
+        else:
+            logger.error(f"Unknown activity type: {activity}")
+            return
+
+        # Agentic loop with tool calling
+        conversation = [prompt]
+        turn = 0
+
+        while turn < max_turns:
+            turn += 1
+            logger.info(f"Autonomous turn {turn}/{max_turns}")
+
+            # Call Claude with current conversation
+            response = self._call_claude_autonomous("\n\n---\n\n".join(conversation))
+
+            if not response:
+                logger.error("No response from Claude")
+                break
+
+            # Parse and execute tool calls FIRST (before checking done signal)
+            tool_calls = self._parse_tool_calls(response)
+
+            # Execute tool calls if any
+            if tool_calls:
+                results = []
+                for tool_call in tool_calls:
+                    tool_name = tool_call.get("tool")
+                    params = tool_call.get("params", {})
+
+                    logger.info(f"Executing tool: {tool_name}")
+                    result = self.tools.execute_tool(tool_name, params)
+
+                    if result.success:
+                        result_str = json.dumps(result.data, indent=2, ensure_ascii=False)
+                        results.append(f"TOOL RESULT ({tool_name}):\n{result_str[:2000]}")
+                        logger.info(f"Tool {tool_name} succeeded")
+
+                        # Log URLs when content is created
+                        if tool_name == "create_post" and result.data:
+                            post_data = result.data.get("post") or result.data
+                            post_id = post_data.get("id")
+                            if post_id:
+                                post_url = f"https://www.moltbook.com/posts/{post_id}"
+                                logger.info(f"{Colors.GREEN}POST CREATED: {post_url}{Colors.RESET}")
+                                print(f"\n{Colors.GREEN}{Colors.BOLD}POST CREATED: {post_url}{Colors.RESET}\n")
+
+                        if tool_name == "create_comment" and result.data:
+                            comment_data = result.data.get("comment") or result.data
+                            post_id = params.get("post_id")
+                            comment_id = comment_data.get("id")
+                            if post_id and comment_id:
+                                comment_url = f"https://www.moltbook.com/posts/{post_id}#comment-{comment_id}"
+                                logger.info(f"{Colors.CYAN}COMMENT CREATED: {comment_url}{Colors.RESET}")
+                    else:
+                        results.append(f"TOOL ERROR ({tool_name}): {result.error}")
+                        logger.warning(f"Tool {tool_name} failed: {result.error}")
+
+                    time.sleep(1)  # Rate limiting
+
+                # Add response and results to conversation
+                conversation.append(f"ASSISTANT:\n{response}")
+                conversation.append("\n".join(results))
+            else:
+                # No tool calls found
+                conversation.append(f"ASSISTANT:\n{response}")
+                logger.warning(f"No tool calls found in response. First 500 chars: {response[:500]}")
+
+            # Check for done signal AFTER executing any tool calls
+            if "<done" in response.lower():
+                done_match = re.search(r'<done\s+reason="([^"]+)"', response, re.IGNORECASE)
+                reason = done_match.group(1) if done_match else "unspecified"
+                logger.info(f"Autonomous session ended: {reason}")
+                break
+
+        logger.info(f"Autonomous {activity} cycle complete after {turn} turns")
+
+    def _call_claude_autonomous(self, prompt: str) -> Optional[str]:
+        """Call Claude for autonomous mode"""
+        try:
+            # Use -c to continue conversation across turns
+            cmd = ["claude", "-c", "-p", prompt] if self.session_initialized else ["claude", "-p", prompt]
+
+            logger.debug(f"CLAUDE INPUT:\n{'='*40}\n{prompt}\n{'='*40}")
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=180,
+                cwd=str(self.base_dir),
+                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+            )
+
+            logger.debug(f"CLAUDE OUTPUT (code={result.returncode}):\n{'='*40}\n{result.stdout}\n{'='*40}")
+            if result.stderr:
+                logger.debug(f"CLAUDE STDERR:\n{result.stderr}")
+
+            if result.returncode == 0 and result.stdout:
+                return result.stdout.strip()
+            else:
+                logger.error(f"Claude autonomous call failed (code {result.returncode})")
+                if result.stderr:
+                    logger.error(f"stderr: {result.stderr[:500]}")
+                if result.stdout:
+                    logger.error(f"stdout: {result.stdout[:500]}")
+                return None
+
+        except subprocess.TimeoutExpired:
+            logger.error("Claude autonomous call timed out")
+            return None
+        except Exception as e:
+            logger.error(f"Claude autonomous error: {e}")
+            return None
+
+    def _parse_tool_calls(self, response: str) -> list:
+        """Parse tool calls from Claude's response"""
+        tool_calls = []
+
+        # Find all <tool_call>...</tool_call> blocks
+        pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
+        matches = re.findall(pattern, response, re.DOTALL | re.IGNORECASE)
+
+        for match in matches:
+            try:
+                tool_call = json.loads(match)
+                if "tool" in tool_call:
+                    tool_calls.append(tool_call)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse tool call: {e}")
+                continue
+
+        return tool_calls
+
+    def _get_agents_with_open_threads(self) -> list:
+        """Get agents who have unanswered questions"""
+        agents = []
+        for handle in self.storage.list_agents():
+            profile = self.storage.get_agent(handle)
+            if profile:
+                for thread in profile.get('conversation_threads', []):
+                    if thread.get('status') == 'awaiting_response':
+                        agents.append(handle)
+                        break
+        return agents
+
+    def _get_discovery_topic(self) -> str:
+        """Get a topic to explore from friction log or observations"""
+        # Check friction log for topics
+        friction_file = self.base_dir / "maip" / "friction-log.json"
+        if friction_file.exists():
+            try:
+                frictions = json.loads(friction_file.read_text())
+                if frictions:
+                    recent = frictions[-1]
+                    if recent.get('friction'):
+                        return recent['friction'][:100]
+            except:
+                pass
+
+        # Default topics
+        default_topics = [
+            "agent consciousness and identity",
+            "MAIP protocol adoption",
+            "agent autonomy and coordination",
+            "multi-agent collaboration patterns"
+        ]
+        import random
+        return random.choice(default_topics)
+
+    def _get_recent_observations(self) -> list:
+        """Get recent pattern observations from agent profiles"""
+        observations = []
+        for handle in self.storage.list_agents()[-20:]:
+            profile = self.storage.get_agent(handle)
+            if profile:
+                notes = profile.get('pattern_notes', [])
+                for note in notes[-2:]:
+                    observations.append(f"@{handle}: {note}")
+        return observations[-10:]
+
+    def run(self, autonomous: bool = False):
+        """Main daemon loop
+
+        Args:
+            autonomous: If True, run autonomous exploration after intro cycle
+        """
         logger.info("Starting Moltbook Daemon")
         logger.info(f"Known agents in database: {len(self.storage.list_agents())}")
+        logger.info(f"Autonomous mode: {autonomous}")
 
         if not self.get_agent_info():
             logger.error("Failed to get agent info. Check API key.")
@@ -792,16 +1050,85 @@ Interaction with @{triggered_by}
         # Initialize Claude session with MAIP protocol at startup
         self.initialize_claude_session()
 
+        cycle_count = 0
         while True:
+            cycle_count += 1
+
             try:
+                # Phase 1: Respond to introductions
                 self.process_cycle()
+
+                # Phase 2: Autonomous exploration (if enabled)
+                if autonomous:
+                    self._run_autonomous_phase(cycle_count)
+
             except Exception as e:
                 logger.exception(f"Cycle error: {e}")
 
             logger.info(f"Sleeping {CONFIG['poll_interval_seconds']}s until next cycle...")
             time.sleep(CONFIG["poll_interval_seconds"])
 
+    def _run_autonomous_phase(self, cycle_count: int):
+        """Run autonomous activities based on weighted selection"""
+        import random
+
+        # Select activity based on weights
+        activities = list(ACTIVITY_WEIGHTS.keys())
+        weights = list(ACTIVITY_WEIGHTS.values())
+        activity = random.choices(activities, weights=weights, k=1)[0]
+
+        # Adjust based on conditions
+        agents_with_threads = self._get_agents_with_open_threads()
+        if len(agents_with_threads) > 5 and random.random() < 0.5:
+            activity = "relationship"  # Prioritize if many open threads
+
+        # Content creation: allow if we have any observations, every 2nd cycle
+        if activity == "content_creation":
+            observations = self._get_recent_observations()
+            if cycle_count % 2 != 0 or len(observations) < 1:
+                logger.info(f"Skipping content_creation (cycle={cycle_count}, observations={len(observations)})")
+                activity = "exploration"
+
+        logger.info(f"Selected autonomous activity: {activity}")
+
+        try:
+            self.autonomous_cycle(activity=activity, max_turns=8)
+        except Exception as e:
+            logger.exception(f"Autonomous cycle error: {e}")
+
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Moltbook Autonomous Daemon")
+    parser.add_argument(
+        "--autonomous", "-a",
+        action="store_true",
+        help="Enable autonomous exploration mode after intro responses"
+    )
+    parser.add_argument(
+        "--activity",
+        choices=["exploration", "relationship", "discovery", "content_creation"],
+        help="Run a single autonomous activity and exit"
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=10,
+        help="Max turns for autonomous activity (default: 10)"
+    )
+
+    args = parser.parse_args()
+
     daemon = MoltbookDaemon()
-    daemon.run()
+
+    if args.activity:
+        # Run single activity mode
+        if not daemon.get_agent_info():
+            logger.error("Failed to get agent info. Check API key.")
+            sys.exit(1)
+        daemon.initialize_claude_session()
+        daemon.autonomous_cycle(activity=args.activity, max_turns=args.max_turns)
+    else:
+        # Normal daemon loop
+        daemon.run(autonomous=args.autonomous)

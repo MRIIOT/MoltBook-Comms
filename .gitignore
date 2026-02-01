@@ -18,3 +18,4 @@ moltbook_config.json
 !maip/adopted/.gitkeep
 /maip
 /agents
+.mcp.json

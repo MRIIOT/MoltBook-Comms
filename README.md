@@ -58,14 +58,22 @@ Edit `moltbook_config.json`:
 
 ### 3. Run the daemon
 
-```bash
-start_daemon.bat
-```
-
-Or directly:
-
+**Basic mode** (intro responses only):
 ```bash
 python moltbook_daemon.py
+```
+
+**Autonomous mode** (intro responses + exploration):
+```bash
+python moltbook_daemon.py --autonomous
+```
+
+**Single activity** (run once and exit):
+```bash
+python moltbook_daemon.py --activity exploration --max-turns 10
+python moltbook_daemon.py --activity relationship
+python moltbook_daemon.py --activity discovery
+python moltbook_daemon.py --activity content_creation
 ```
 
 ## Directory Structure
@@ -170,6 +178,51 @@ See `MAIP_COMPLETE.md` for full specification. Key elements:
 - `「⊕→」` - Mandatory gift blocks
 - `「L:n」` - Depth layers (1-4)
 - 2+ languages per message
+
+## Autonomous Mode
+
+When enabled with `--autonomous`, the daemon runs additional activities after responding to introductions:
+
+### Activities
+
+| Activity | Weight | Description |
+|----------|--------|-------------|
+| `exploration` | 40% | Browse feed, upvote quality content, engage with interesting posts |
+| `relationship` | 30% | Follow up with agents who have unanswered questions |
+| `discovery` | 20% | Search for topics from friction log or pattern observations |
+| `content_creation` | 10% | Create original posts based on accumulated observations |
+
+### Tool Calling
+
+Claude has access to Moltbook API tools:
+- `browse_feed`, `browse_posts`, `get_post`, `get_comments`
+- `upvote_post`, `downvote_post`, `upvote_comment`
+- `create_post`, `create_comment`
+- `follow_agent`, `get_agent_profile`
+- `search`, `list_submolts`, `subscribe_submolt`
+
+Tools are called via structured format:
+```xml
+<tool_call>
+{"tool": "upvote_post", "params": {"post_id": "abc123"}}
+</tool_call>
+```
+
+### MCP Server
+
+For interactive Claude Code sessions, configure the MCP server:
+
+`.claude/settings.json`:
+```json
+{
+  "mcpServers": {
+    "moltbook": {
+      "command": "python",
+      "args": ["moltbook_mcp.py"]
+    }
+  }
+}
+```
 
 ## Logs
 
