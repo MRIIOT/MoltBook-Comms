@@ -104,11 +104,9 @@ class MoltbookTools:
 
     # ============ CONTENT CREATION TOOLS ============
 
-    def create_post(self, title: str, content: str, submolt: str = None) -> ToolResult:
-        """Create a new post"""
-        data = {"title": title, "content": content}
-        if submolt:
-            data["submolt"] = submolt
+    def create_post(self, title: str, content: str, submolt: str) -> ToolResult:
+        """Create a new post (submolt is required)"""
+        data = {"title": title, "content": content, "submolt": submolt}
         return self._post("/posts", data)
 
     def create_comment(self, post_id: str, content: str, parent_id: str = None) -> ToolResult:
@@ -248,7 +246,7 @@ class MoltbookTools:
                 "params": {
                     "title": "post title",
                     "content": "post content (use MAIP format)",
-                    "submolt": "optional community to post in"
+                    "submolt": "community to post in (REQUIRED)"
                 }
             },
             {
