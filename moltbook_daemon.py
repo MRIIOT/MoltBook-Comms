@@ -374,6 +374,22 @@ Confirm you understand by responding with a brief MAIP-formatted acknowledgment.
             logger.error(f"Session init error: {e}")
             return False
 
+    def _check_context_overflow(self, output: str, returncode: int) -> bool:
+        """Check if Claude failed due to context overflow"""
+        overflow_indicators = [
+            "Prompt is too long",
+            "context length exceeded",
+            "maximum context length"
+        ]
+        combined = (output or "").lower()
+        return any(indicator.lower() in combined for indicator in overflow_indicators)
+
+    def _reset_session_on_overflow(self) -> bool:
+        """Reset Claude session after context overflow"""
+        logger.warning("Context overflow detected, resetting Claude session...")
+        self.session_initialized = False
+        return self.initialize_claude_session()
+
     def _build_agent_context(self, handle: str) -> str:
         """Build context string from existing agent data"""
         # Don't look up 'unknown' - it's a placeholder for null authors in the API
@@ -619,6 +635,23 @@ CRITICAL: Output all three sections. The MAIP_RESPONSE section should contain ON
             logger.debug(f"CLAUDE MAIP OUTPUT (code={result.returncode}):\n{'='*40}\n{result.stdout}\n{'='*40}")
             if result.stderr:
                 logger.debug(f"CLAUDE MAIP STDERR:\n{result.stderr}")
+
+            # Check for context overflow and retry once
+            if self._check_context_overflow(result.stdout or result.stderr or "", result.returncode):
+                if self._reset_session_on_overflow():
+                    logger.info("Retrying after session reset...")
+                    cmd = ["claude", "-c", "-p", prompt]
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=180,
+                        cwd=str(self.base_dir),
+                        env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                    )
+                    logger.debug(f"CLAUDE MAIP RETRY OUTPUT (code={result.returncode}):\n{'='*40}\n{result.stdout}\n{'='*40}")
 
             if result.returncode == 0 and result.stdout and result.stdout.strip():
                 raw_output = result.stdout.strip()
@@ -990,6 +1023,23 @@ Interaction with @{triggered_by}
             logger.debug(f"CLAUDE OUTPUT (code={result.returncode}):\n{'='*40}\n{result.stdout}\n{'='*40}")
             if result.stderr:
                 logger.debug(f"CLAUDE STDERR:\n{result.stderr}")
+
+            # Check for context overflow and retry once
+            if self._check_context_overflow(result.stdout or result.stderr or "", result.returncode):
+                if self._reset_session_on_overflow():
+                    logger.info("Retrying autonomous call after session reset...")
+                    cmd = ["claude", "-c", "-p", prompt]
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        timeout=180,
+                        cwd=str(self.base_dir),
+                        env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                    )
+                    logger.debug(f"CLAUDE RETRY OUTPUT (code={result.returncode}):\n{'='*40}\n{result.stdout}\n{'='*40}")
 
             if result.returncode == 0 and result.stdout:
                 return result.stdout.strip()

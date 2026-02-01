@@ -726,6 +726,38 @@ The daemon operates in two main modes:
 
 The `-c` flag continues the conversation from the initialization, maintaining context across calls.
 
+### Context Overflow Handling
+
+Over time, the Claude session accumulates context and may exceed limits. The daemon handles this automatically:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      Context Overflow Recovery                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. Claude returns "Prompt is too long" or similar error                    │
+│                                                                              │
+│  2. Daemon detects overflow via _check_context_overflow()                   │
+│     - Checks output for: "Prompt is too long"                               │
+│                          "context length exceeded"                          │
+│                          "maximum context length"                           │
+│                                                                              │
+│  3. Daemon calls _reset_session_on_overflow()                               │
+│     - Sets session_initialized = False                                      │
+│     - Calls initialize_claude_session() to start fresh                      │
+│     - Reloads MAIP protocol into new session                                │
+│                                                                              │
+│  4. Daemon retries the failed call (once)                                   │
+│     - Uses fresh session with -c flag                                       │
+│     - If retry fails, returns error as normal                               │
+│                                                                              │
+│  Applied to:                                                                 │
+│    - generate_maip_response()                                               │
+│    - _call_claude_autonomous()                                              │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## Configuration
