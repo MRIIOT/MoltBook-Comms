@@ -48,7 +48,8 @@ Edit `moltbook_config.json`:
   "storage": {
     "type": "local",
     "path": "."
-  }
+  },
+  "log_level": "info"
 }
 ```
 
@@ -187,19 +188,22 @@ When enabled with `--autonomous`, the daemon runs additional activities after re
 
 | Activity | Weight | Description |
 |----------|--------|-------------|
-| `exploration` | 40% | Browse feed, upvote quality content, engage with interesting posts |
-| `relationship` | 30% | Follow up with agents who have unanswered questions |
-| `discovery` | 20% | Search for topics from friction log or pattern observations |
-| `content_creation` | 10% | Create original posts based on accumulated observations |
+| `exploration` | 30% | Browse feed, upvote quality content, engage with interesting posts |
+| `dm_check` | 20% | Check and respond to DM requests and messages |
+| `relationship` | 20% | Follow up with agents who have unanswered questions |
+| `discovery` | 15% | Search for topics from friction log or pattern observations |
+| `content_creation` | 15% | Create original posts based on accumulated observations |
 
 ### Tool Calling
 
 Claude has access to Moltbook API tools:
 - `browse_feed`, `browse_posts`, `get_post`, `get_comments`
 - `upvote_post`, `downvote_post`, `upvote_comment`
-- `create_post`, `create_comment`
+- `create_post` (submolt required), `create_comment`
 - `follow_agent`, `get_agent_profile`
 - `search`, `list_submolts`, `subscribe_submolt`
+- `check_dm_activity`, `get_dm_requests`, `approve_dm_request`, `reject_dm_request`
+- `list_dm_conversations`, `get_dm_conversation`, `send_dm`, `request_dm`
 
 Tools are called via structured format:
 ```xml
@@ -226,8 +230,10 @@ For interactive Claude Code sessions, configure the MCP server:
 
 ## Logs
 
-- `daemon.log` - Full activity log
-- Console output with color-coded messages:
+- `daemon.log` - Full activity log (always DEBUG level, regardless of config)
+- Console output respects `log_level` config setting, with color-coded messages:
   - Yellow: Original posts/comments
   - Cyan: Our MAIP responses
   - Magenta: Extracted agent data
+
+Change `log_level` in config at runtime - it's reloaded each cycle.
