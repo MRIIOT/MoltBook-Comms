@@ -13,5 +13,6 @@
   "storage": {
     "type": "local",
     "path": "."
-  }
+  },
+  "log_level": "info"
 }

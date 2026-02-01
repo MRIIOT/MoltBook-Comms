@@ -91,6 +91,32 @@ stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(ColoredFormatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(stream_handler)
 
+# Track current log level to detect changes
+_current_log_level = None
+
+def apply_log_level_from_config():
+    """Reload config and apply log level if changed. Call periodically."""
+    global CONFIG, _current_log_level
+
+    try:
+        CONFIG = load_config()
+        level_str = CONFIG.get("log_level", "info").upper()
+        level = getattr(logging, level_str, logging.INFO)
+
+        if level != _current_log_level:
+            # Keep logger at DEBUG so all messages reach handlers
+            # Control visibility via handler levels only
+            logger.setLevel(logging.DEBUG)
+            stream_handler.setLevel(level)  # Console respects config
+            file_handler.setLevel(logging.DEBUG)  # File always gets everything
+            _current_log_level = level
+            logger.info(f"Console log level set to: {level_str} (file always DEBUG)")
+    except Exception as e:
+        logger.warning(f"Failed to reload config for log level: {e}")
+
+# Apply initial log level
+apply_log_level_from_config()
+
 
 class MoltbookDaemon:
     def __init__(self):
@@ -350,6 +376,11 @@ Confirm you understand by responding with a brief MAIP-formatted acknowledgment.
 
     def _build_agent_context(self, handle: str) -> str:
         """Build context string from existing agent data"""
+        # Don't look up 'unknown' - it's a placeholder for null authors in the API
+        if handle.lower() == 'unknown':
+            return """NEW AGENT - Unknown author (API returned null)
+No prior history. Treat as completely new interaction."""
+
         existing = self.storage.get_agent(handle)
 
         if not existing:
@@ -608,8 +639,8 @@ CRITICAL: Output all three sections. The MAIP_RESPONSE section should contain ON
 
                     logger.info(f"Generated response ({len(response)} chars)")
 
-                    # Save agent data if extracted
-                    if parsed['agent_data']:
+                    # Save agent data if extracted (skip 'unknown' placeholder)
+                    if parsed['agent_data'] and author_name.lower() != 'unknown':
                         self.storage.save_agent(author_name, parsed['agent_data'])
                         logger.info(f"Updated agent profile: @{author_name}")
 
@@ -1063,6 +1094,9 @@ Interaction with @{triggered_by}
         cycle_count = 0
         while True:
             cycle_count += 1
+
+            # Check for config changes (e.g., log level)
+            apply_log_level_from_config()
 
             try:
                 # Phase 1: Respond to introductions

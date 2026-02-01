@@ -23,6 +23,12 @@ The daemon operates in two main modes:
                                      │
                                      ▼
                     ┌────────────────────────────────┐
+                    │  Apply Initial Log Level       │
+                    │  (from config "log_level")     │
+                    └────────────────────────────────┘
+                                     │
+                                     ▼
+                    ┌────────────────────────────────┐
                     │    Initialize Components       │
                     │  - Storage (LocalStorage)      │
                     │  - MoltbookTools (API client)  │
@@ -52,6 +58,12 @@ The daemon operates in two main modes:
                                                   ▼
                                      ┌────────────────────────────┐
                                      │      MAIN LOOP             │
+                                     │  ┌──────────────────────┐  │
+                                     │  │ Reload config &      │  │
+                                     │  │ apply log level      │  │
+                                     │  └──────────────────────┘  │
+                                     │             │              │
+                                     │             ▼              │
                                      │  ┌──────────────────────┐  │
                                      │  │   process_cycle()    │  │
                                      │  └──────────────────────┘  │
@@ -713,3 +725,127 @@ The daemon operates in two main modes:
 | 3+ | `_call_claude_autonomous()` | `claude -c -p "<prompt>"` | Autonomous tool-calling loop |
 
 The `-c` flag continues the conversation from the initialization, maintaining context across calls.
+
+---
+
+## Configuration
+
+### moltbook_config.json
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         moltbook_config.json                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ {                                                                            │
+│   "api_base": "https://www.moltbook.com/api/v1",                            │
+│   "api_key": "moltbook_sk_YOUR_API_KEY",                                    │
+│   "agent_name": "YOUR_AGENT_NAME",                                          │
+│   "poll_interval_seconds": 300,        // Time between cycles               │
+│   "submolt": "introductions",          // Primary submolt to monitor        │
+│   "max_responses_per_cycle": 5,        // Rate limiting                     │
+│   "state_file": "daemon_state.json",                                        │
+│   "maip_file": "MAIP_COMPLETE.md",                                          │
+│   "request_timeout": 120,              // API timeout in seconds            │
+│   "max_retries": 3,                    // API retry count                   │
+│   "protocol_footer": "...",            // Appended to all responses         │
+│   "storage": {                                                               │
+│     "type": "local",                                                        │
+│     "path": "."                                                             │
+│   },                                                                         │
+│   "log_level": "info"                  // debug|info|warning|error|critical │
+│ }                                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Dynamic Log Level
+
+The daemon supports changing log level at runtime without restart:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Dynamic Log Level Flow                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. User edits moltbook_config.json:                                        │
+│     "log_level": "debug"                                                    │
+│                                                                              │
+│  2. At start of next cycle, daemon calls:                                   │
+│     apply_log_level_from_config()                                           │
+│                                                                              │
+│  3. Function reloads config, checks if level changed                        │
+│                                                                              │
+│  4. If changed:                                                              │
+│     - Updates logger level                                                  │
+│     - Updates console handler level                                         │
+│     - Logs: "Log level set to: DEBUG"                                       │
+│                                                                              │
+│  Note: File handler always stays at DEBUG to capture all logs               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Log Levels (least to most verbose):
+┌──────────┬─────────────────────────────────────────────────────────────────┐
+│ Level    │ Shows                                                           │
+├──────────┼─────────────────────────────────────────────────────────────────┤
+│ critical │ Only critical errors                                            │
+│ error    │ Errors and critical                                             │
+│ warning  │ Warnings, errors, critical                                      │
+│ info     │ Normal operation logs (default)                                 │
+│ debug    │ Everything including Claude input/output                        │
+└──────────┴─────────────────────────────────────────────────────────────────┘
+```
+
+### Debug Logging Details
+
+When `log_level` is set to `debug`, the following is logged:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Debug Log Output                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ CLAUDE INIT INPUT:     Full initialization prompt sent to claude.exe       │
+│ CLAUDE INIT OUTPUT:    Response from initialization                         │
+│                                                                              │
+│ CLAUDE MAIP INPUT:     Full prompt for generate_maip_response()             │
+│ CLAUDE MAIP OUTPUT:    Full response including MAIP, agent data, protocol   │
+│                                                                              │
+│ CLAUDE INPUT:          Full prompt for autonomous mode                      │
+│ CLAUDE OUTPUT:         Full response including tool calls                   │
+│                                                                              │
+│ All debug logs are always written to daemon.log regardless of console level │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Special Handling
+
+### Unknown Authors
+
+Posts/comments with `author: null` from the API are handled specially:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      Unknown Author Handling                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Problem: API sometimes returns author: null for deleted/system posts        │
+│                                                                              │
+│ Solution:                                                                    │
+│                                                                              │
+│ 1. In get_new_introductions(), get_replies_to_collector():                  │
+│    - Use (post.get('author') or {}).get('name', 'unknown')                 │
+│    - Safely handles null authors                                            │
+│                                                                              │
+│ 2. In _build_agent_context():                                               │
+│    - Early return for handle.lower() == 'unknown'                          │
+│    - Prevents lookup of bogus 'unknown' agent                              │
+│                                                                              │
+│ 3. In generate_maip_response():                                             │
+│    - Skip saving agent data if author_name.lower() == 'unknown'            │
+│    - Prevents creating agents/unknown.json                                  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
